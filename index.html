@@ -404,37 +404,30 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
     const [autoLoading2, setAutoLoading2] = useState(false);
     const [autoError, setAutoError] = useState("");
     const [initialLoad, setInitialLoad] = useState(true);
-    const loadAutoEmails = useCallback(async (silent = false) => {
+    const loadAutoEmails = async (silent = false) => {
         if (!dbReady()) {
             setAutoError("Supabase não configurado.");
+            setInitialLoad(false);
             return;
         }
-        // silent=true during polling — never clear existing emails while loading
         if (!silent)
             setAutoLoading2(true);
         setAutoError("");
         try {
             const rows = await db.get("inbox");
-            if (Array.isArray(rows) && rows.length > 0) {
-                // Always replace with fresh data — but only after fetch succeeds
+            if (Array.isArray(rows)) {
                 setAutoEmails(rows.sort((a, b) => b.id - a.id));
             }
-            else if (Array.isArray(rows) && rows.length === 0) {
-                // Only clear if Supabase explicitly returned empty array
-                setAutoEmails([]);
-            }
-            // If rows is null/undefined, keep existing emails (network hiccup)
         }
         catch (e) {
-            // On error, keep existing emails visible — just show subtle error
-            setAutoError("Erro ao atualizar. Tentando novamente...");
-            setTimeout(() => setAutoError(""), 4000);
+            if (!silent)
+                setAutoError(e.message || "Erro ao conectar com Supabase.");
         }
         finally {
             setAutoLoading2(false);
             setInitialLoad(false);
         }
-    }, []);
+    };
     // Classify a single email on demand (called when user opens the email)
     const classifyEmail = useCallback(async (em) => {
         if (em.ai_result || !em.body)
@@ -465,7 +458,7 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
         loadAutoEmails();
         const interval = setInterval(() => loadAutoEmails(true), 30000);
         return () => clearInterval(interval);
-    }, [loadAutoEmails]);
+    }, []);
     // Sync with savedEmails from Supabase when loaded
     useEffect(() => {
         if (savedEmails && savedEmails.length > 0)
@@ -643,8 +636,8 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
             autoError && React.createElement("div", { style: { background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 4, padding: '10px 14px', marginBottom: 12, fontSize: 13, color: '#991b1b' } },
                 "\u274C ",
                 autoError),
-            initialLoad && autoLoading2 && (React.createElement("div", { style: { ...S.card, textAlign: "center", padding: 32, color: BRAND.gray400 } }, "\u23F3 Carregando e-mails...")),
-            autoEmails.length === 0 && !autoLoading2 && !initialLoad ? (React.createElement("div", { style: S.card },
+            initialLoad && (React.createElement("div", { style: { ...S.card, textAlign: "center", padding: 32, color: BRAND.gray400 } }, "\u23F3 Carregando e-mails...")),
+            autoEmails.length === 0 && !initialLoad ? (React.createElement("div", { style: S.card },
                 React.createElement("div", { style: { ...S.cb, textAlign: "center", padding: "48px", color: BRAND.gray400 } },
                     React.createElement("div", { style: { fontSize: 32, marginBottom: 12 } }, "\uD83D\uDCED"),
                     React.createElement("div", { style: { fontWeight: 600, color: BRAND.gray600, fontSize: 15, marginBottom: 6 } }, "Nenhum e-mail recebido ainda"),
