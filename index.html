@@ -403,25 +403,31 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
     const [autoLoading, setAutoLoading] = useState(false);
     const [autoLoading2, setAutoLoading2] = useState(false);
     const [autoError, setAutoError] = useState("");
-    const loadAutoEmails = useCallback(async () => {
+    const loadAutoEmails = useCallback(async (silent = false) => {
         if (!dbReady()) {
             setAutoError("Supabase não configurado.");
             return;
         }
-        setAutoLoading2(true);
+        // silent=true during polling — never clear existing emails while loading
+        if (!silent)
+            setAutoLoading2(true);
         setAutoError("");
         try {
             const rows = await db.get("inbox");
-            if (Array.isArray(rows)) {
-                // Show emails immediately — no waiting for AI classification
+            if (Array.isArray(rows) && rows.length > 0) {
+                // Always replace with fresh data — but only after fetch succeeds
                 setAutoEmails(rows.sort((a, b) => b.id - a.id));
             }
-            else {
-                setAutoError("Erro ao carregar e-mails.");
+            else if (Array.isArray(rows) && rows.length === 0) {
+                // Only clear if Supabase explicitly returned empty array
+                setAutoEmails([]);
             }
+            // If rows is null/undefined, keep existing emails (network hiccup)
         }
         catch (e) {
-            setAutoError(e.message || "Erro ao conectar com Supabase.");
+            // On error, keep existing emails visible — just show subtle error
+            setAutoError("Erro ao atualizar. Tentando novamente...");
+            setTimeout(() => setAutoError(""), 4000);
         }
         finally {
             setAutoLoading2(false);
@@ -455,7 +461,7 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
     // Load on mount + poll every 30s
     useEffect(() => {
         loadAutoEmails();
-        const interval = setInterval(loadAutoEmails, 30000);
+        const interval = setInterval(() => loadAutoEmails(true), 30000);
         return () => clearInterval(interval);
     }, [loadAutoEmails]);
     // Sync with savedEmails from Supabase when loaded
@@ -1018,6 +1024,23 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
     const [form, setForm] = useState({ title: "", status: "pending", due: "", case: "", notes: "" });
     const [dragging, setDragging] = useState(null);
     const [dragOver, setDragOver] = useState(null);
+    const [emailPreview, setEmailPreview] = useState(null);
+    const [loadingEmail, setLoadingEmail] = useState(false);
+    const openEmailPreview = useCallback(async (inboxId) => {
+        setLoadingEmail(true);
+        setEmailPreview(null);
+        try {
+            const rows = await db.get("inbox");
+            const em = Array.isArray(rows) ? rows.find(r => r.id === inboxId) : null;
+            setEmailPreview(em || { error: "E-mail não encontrado." });
+        }
+        catch {
+            setEmailPreview({ error: "Erro ao carregar e-mail." });
+        }
+        finally {
+            setLoadingEmail(false);
+        }
+    }, []);
     // Load tasks from Supabase on mount — no fake default tasks
     useEffect(() => {
         if (!dbReady()) {
@@ -1026,7 +1049,7 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
         }
         db.get("tasks").then(rows => {
             if (Array.isArray(rows)) {
-                setTasks(rows.map(r => ({ id: r.id, title: r.title, status: r.status, due: r.due || "", case: r.case_ref || "", notes: r.notes || "" })));
+                setTasks(rows.map(r => ({ id: r.id, title: r.title, status: r.status, due: r.due || "", case: r.case_ref || "", notes: r.notes || "", inboxId: r.inbox_id || null })));
             }
             setLoading(false);
         }).catch(() => setLoading(false));
@@ -1036,7 +1059,7 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
             const newTask = { id: Date.now(), title: externalTask.title || "Nova tarefa", status: externalTask.priority === "High" ? "urgent" : "pending", due: "", case: "", notes: externalTask.notes || "" };
             setTasks(p => [newTask, ...p]);
             if (dbReady())
-                db.insert("tasks", { id: newTask.id, title: newTask.title, status: newTask.status, due: newTask.due, case_ref: newTask.case, notes: newTask.notes });
+                db.insert("tasks", { id: newTask.id, title: newTask.title, status: newTask.status, due: newTask.due, case_ref: newTask.case, notes: newTask.notes, inbox_id: newTask.inboxId || null });
             onExternalTaskConsumed();
         }
     }, [externalTask]);
@@ -1102,11 +1125,13 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
                                 "#",
                                 task.case))),
                         task.notes && (React.createElement("div", { style: { fontSize: 13, color: BRAND.gray600, marginBottom: 10, lineHeight: 1.5, background: col.bg, padding: "6px 10px", borderRadius: 4 } }, task.notes)),
-                        React.createElement("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 8, paddingTop: 8, borderTop: `1px solid ${col.border}` } },
+                        React.createElement("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 8, paddingTop: 8, borderTop: `1px solid ${col.border}`, flexWrap: "wrap" } },
+                            task.inboxId && (React.createElement("button", { style: mkBtn("outline", { padding: "5px 12px", fontSize: 12, flex: 1 }), onClick: () => openEmailPreview(task.inboxId) }, "\uD83D\uDCE7 Ver E-mail")),
                             React.createElement("button", { style: mkBtn("gray", { padding: "5px 12px", fontSize: 12 }), onClick: () => open(task) }, "Editar"),
                             React.createElement("button", { style: mkBtn("gray", { padding: "5px 10px", fontSize: 12, color: "#c0392b" }), onClick: () => { setTasks(p => p.filter(x => x.id !== task.id)); if (dbReady())
                                     db.remove("tasks", task.id); } }, "\u2715"))))))));
         })),
+        (emailPreview || loadingEmail) && (React.createElement(Modal, { title: "E-mail Vinculado", onClose: () => setEmailPreview(null), maxWidth: 620, footer: React.createElement("button", { style: mkBtn("gray"), onClick: () => setEmailPreview(null) }, "Fechar") }, loadingEmail ? (React.createElement("div", { style: { padding: 32, textAlign: "center", color: "#888" } }, "Carregando e-mail...")) : (emailPreview === null || emailPreview === void 0 ? void 0 : emailPreview.error) ? (React.createElement("div", { style: { padding: 16, color: "#c0392b" } }, emailPreview.error)) : (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12 } }, React.createElement("div", { style: { display: "grid", gridTemplateColumns: "80px 1fr", gap: "6px 12px", fontSize: 13 } }, React.createElement("span", { style: { color: "#888", fontWeight: 600 } }, "De:"), React.createElement("span", null, emailPreview.from_name ? `${emailPreview.from_name} <${emailPreview.from_email}>` : emailPreview.from_email), React.createElement("span", { style: { color: "#888", fontWeight: 600 } }, "Assunto:"), React.createElement("span", { style: { fontWeight: 700 } }, emailPreview.subject), React.createElement("span", { style: { color: "#888", fontWeight: 600 } }, "Recebido:"), React.createElement("span", null, emailPreview.received_at ? new Date(emailPreview.received_at).toLocaleString("pt-BR") : "—"), emailPreview.cc && React.createElement(React.Fragment, null, React.createElement("span", { style: { color: "#888", fontWeight: 600 } }, "CC:"), React.createElement("span", null, emailPreview.cc))), emailPreview.ai_result && React.createElement("div", { style: { background: "#f0faf4", border: "1px solid #b2dfdb", borderRadius: 6, padding: "10px 14px", fontSize: 13 } }, React.createElement("div", { style: { fontWeight: 700, marginBottom: 6, color: "#1a7a4a" } }, "📊 Análise IA"), React.createElement("div", null, "Categoria: ", React.createElement("b", null, emailPreview.ai_result.category)), React.createElement("div", null, "Prioridade: ", React.createElement("b", null, emailPreview.ai_result.priority)), emailPreview.ai_result.action_required && React.createElement("div", { style: { marginTop: 6, color: "#555" } }, emailPreview.ai_result.action_required)), React.createElement("div", { style: { background: "#fafafa", border: "1px solid #eee", borderRadius: 6, padding: "12px 14px", fontSize: 13, lineHeight: 1.7, maxHeight: 260, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" } }, stripHtml(emailPreview.body || "")))))),
         showModal && (React.createElement(Modal, { title: editTask ? "Editar Tarefa" : "Nova Tarefa", onClose: () => setShowModal(false), maxWidth: 500, footer: React.createElement(React.Fragment, null,
                 React.createElement("button", { style: mkBtn("gray"), onClick: () => setShowModal(false) }, "Cancelar"),
                 React.createElement("button", { style: mkBtn("primary"), onClick: save }, "Salvar")) },
