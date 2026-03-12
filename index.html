@@ -413,16 +413,8 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
         try {
             const rows = await db.get("inbox");
             if (Array.isArray(rows)) {
+                // Show emails immediately — no waiting for AI classification
                 setAutoEmails(rows.sort((a, b) => b.id - a.id));
-                // Auto-classify any unclassified emails
-                rows.filter(r => !r.ai_result && r.body).forEach(async (em) => {
-                    try {
-                        const res = await callClaude(EMAIL_PROMPT, [{ type: "text", text: `De: ${em.from_email}\nAssunto: ${em.subject}\n\n${stripHtml(em.body)}` }]);
-                        await db.update("inbox", em.id, { ai_result: res });
-                        setAutoEmails(p => p.map(e => e.id === em.id ? { ...e, ai_result: res } : e));
-                    }
-                    catch { }
-                });
             }
             else {
                 setAutoError("Erro ao carregar e-mails.");
@@ -435,12 +427,26 @@ function EmailsHub({ onAddToPlanner, savedEmails = [], onSaveEmail, openInboxId,
             setAutoLoading2(false);
         }
     }, []);
+    // Classify a single email on demand (called when user opens the email)
+    const classifyEmail = useCallback(async (em) => {
+        if (em.ai_result || !em.body)
+            return;
+        try {
+            const res = await callClaude(EMAIL_PROMPT, [{ type: "text", text: `De: ${em.from_email}\nAssunto: ${em.subject}\n\n${stripHtml(em.body)}` }]);
+            await db.update("inbox", em.id, { ai_result: res });
+            setAutoEmails(p => p.map(e => e.id === em.id ? { ...e, ai_result: res } : e));
+        }
+        catch (e) {
+            console.warn("Classificação falhou:", e.message);
+        }
+    }, []);
     // Auto-open email when navigated from Planner
     useEffect(() => {
         if (openInboxId && autoEmails.length > 0) {
             const em = autoEmails.find(e => e.id === openInboxId);
             if (em) {
                 setAutoEmailDetail(em);
+                classifyEmail(em);
                 setSubTab("auto");
                 onClearOpenInbox && onClearOpenInbox();
             }
@@ -1005,27 +1011,25 @@ const COLS = [
     { id: "done", label: "Concluídas", emoji: "✅", color: "#14532d", bg: "#f0fdf4", headerBg: "#dcfce7", border: "#86efac", pillBg: "#22c55e", darkText: false },
 ];
 function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
-    const DEFAULT_TASKS = [
-        { id: 1, title: "Responder PROCON SP #1223301/2026", status: "urgent", due: "15/03/2026", case: "1223301/2026", notes: "Prazo final improrrogável" },
-        { id: 2, title: "Solicitar documentos da assistência técnica", status: "pending", due: "18/03/2026", case: "", notes: "" },
-        { id: 3, title: "Revisar resposta JEC Rio Claro", status: "done", due: "10/03/2026", case: "", notes: "Concluído" },
-        { id: 4, title: "Atualizar planilha de casos Q1", status: "pending", due: "20/03/2026", case: "", notes: "" },
-    ];
-    const [tasks, setTasks] = useState(DEFAULT_TASKS);
+    const [tasks, setTasks] = useState([]);
+    const [loading, setLoading] = useState(true);
     const [showModal, setShowModal] = useState(false);
     const [editTask, setEditTask] = useState(null);
     const [form, setForm] = useState({ title: "", status: "pending", due: "", case: "", notes: "" });
     const [dragging, setDragging] = useState(null);
     const [dragOver, setDragOver] = useState(null);
-    // Load tasks from Supabase on mount
+    // Load tasks from Supabase on mount — no fake default tasks
     useEffect(() => {
-        if (!dbReady())
+        if (!dbReady()) {
+            setLoading(false);
             return;
+        }
         db.get("tasks").then(rows => {
-            if (rows && rows.length > 0) {
+            if (Array.isArray(rows)) {
                 setTasks(rows.map(r => ({ id: r.id, title: r.title, status: r.status, due: r.due || "", case: r.case_ref || "", notes: r.notes || "" })));
             }
-        });
+            setLoading(false);
+        }).catch(() => setLoading(false));
     }, []);
     useEffect(() => {
         if (externalTask) {
@@ -1051,6 +1055,8 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
         setShowModal(false);
     };
     const total = tasks.length;
+    if (loading)
+        return React.createElement("div", { style: { padding: 40, textAlign: "center", color: "#888" } }, "Carregando tarefas...");
     return (React.createElement("div", null,
         React.createElement(SectionTitle, { title: "Planner de Tarefas", subtitle: "Arraste os cards entre colunas para mudar o status", action: React.createElement("button", { style: mkBtn("primary"), onClick: () => open(null) }, "+ Nova Tarefa") }),
         React.createElement("div", { style: { display: "flex", gap: 12, marginBottom: 24 } }, COLS.map(col => {
@@ -1098,7 +1104,8 @@ function Planner({ externalTask, onExternalTaskConsumed, onViewEmail }) {
                         task.notes && (React.createElement("div", { style: { fontSize: 13, color: BRAND.gray600, marginBottom: 10, lineHeight: 1.5, background: col.bg, padding: "6px 10px", borderRadius: 4 } }, task.notes)),
                         React.createElement("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 8, paddingTop: 8, borderTop: `1px solid ${col.border}` } },
                             React.createElement("button", { style: mkBtn("gray", { padding: "5px 12px", fontSize: 12 }), onClick: () => open(task) }, "Editar"),
-                            React.createElement("button", { style: mkBtn("gray", { padding: "5px 10px", fontSize: 12, color: "#c0392b" }), onClick: () => setTasks(p => p.filter(x => x.id !== task.id)) }, "\u2715"))))))));
+                            React.createElement("button", { style: mkBtn("gray", { padding: "5px 10px", fontSize: 12, color: "#c0392b" }), onClick: () => { setTasks(p => p.filter(x => x.id !== task.id)); if (dbReady())
+                                    db.remove("tasks", task.id); } }, "\u2715"))))))));
         })),
         showModal && (React.createElement(Modal, { title: editTask ? "Editar Tarefa" : "Nova Tarefa", onClose: () => setShowModal(false), maxWidth: 500, footer: React.createElement(React.Fragment, null,
                 React.createElement("button", { style: mkBtn("gray"), onClick: () => setShowModal(false) }, "Cancelar"),
